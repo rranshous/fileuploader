@@ -1,0 +1,2 @@
+goal is to create a multiplatform client for doing large
+file uploads in chunks, and the server side to handle it
