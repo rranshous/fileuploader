@@ -8,10 +8,11 @@
 # upload on next launch, as well as uploading dirs
 # instead of files
 
-from urllib2 import Request, HTTPHandler
+from urllib2 import Request, HTTPHandler, urlopen
 from hashlib import md5
 import os.path
 from findfiles import find_files_iter as find_files
+from threading import Thread
 
 import logging
 logging.basicConfig(level=logging.DEBUG)
@@ -45,14 +46,14 @@ def get_file_hash(path):
     # we don't want to read in the while file
     # at once so we'll chunk through it
     m = md5()
-    for chunk in chunk_file(file_path):
+    for chunk in chunk_file(path):
         m.update(chunk)
     return m.hexdigest()
 
 
 HISTORY_PATH = './history.json'
 
-def load_files_history(history):
+def load_files_history():
     
     log.debug('loading history')
 
@@ -172,8 +173,9 @@ class Uploader(object):
             log.debug('creating upload for: %s' % file_path)
 
             # create our upload thread
-            upload = UploadThread(args=(file_path,host,port,
-                                        files_history))
+            upload = UploadThread(file_path,
+                                  self.host,self.port,
+                                  self.files_history)
 
             log.debug('starting upload')
 
@@ -186,8 +188,8 @@ class Uploader(object):
 
 class UploadThread(Thread):
 
-    def __init__(self,*args,**kwargs):
-        Thread.__init__(self,*args,**kwargs)
+    def __init__(self,file_path,host,port,files_history):
+        Thread.__init__(self)
 
         # bytes sent
         self.data_sent = 0
@@ -204,32 +206,44 @@ class UploadThread(Thread):
         # where are we posting to?
         self.url = None
 
+        # what file are we working on?
+        self.file_path = file_path
+
+        # lookup for work done on files
+        self.files_history = files_history
+
+        # where's the file going?
+        self.host = host
+        self.port = port
+
+
     # how far along are we ?
     progress = property(lambda: self.data_sent/self.file_size*100
                                 if self.file_size else None)
 
-    def run(self,file_path,host,port,files_history,
-            **kwargs):
+    def run(self):
         """
         given a source file's path will (re)start uploading
         a file to the server
         """
 
+        # TODO: check the resulting MD5 against the history
+
         log.debug('starting upload thread: %s %s %s' %
-                  file_path,host,port)
+                  (self.file_path,self.host,self.port))
 
         # get the file's size
-        self.file_size = os.path.getsize(file_path)
+        self.file_size = os.path.getsize(self.file_path)
 
         log.debug('file size: %s' % self.file_size)
 
         # we track files by their hash, get this files hash
-        self.file_hash = get_file_hash(file_path)
+        self.file_hash = get_file_hash(self.file_path)
 
         log.debug('file hash: %s' % self.file_hash)
 
         # see if we've already begun uploading it's data
-        file_history = files_history.setdefault(file_hash,{})
+        file_history = self.files_history.setdefault(self.file_hash,{})
 
         log.debug('file history: %s' % file_history)
 
@@ -240,17 +254,17 @@ class UploadThread(Thread):
         log.debug('cursor: %s' % self.cursor)
 
         # set our url from the host and port
-        self.url = 'http://%s:%s' % (host,port)
+        self.url = 'http://%s:%s' % (self.host,self.port)
 
         log.debug('url: %s' % self.url)
 
         # start uploading the file
-        for chunk in chunk_file(file_path):
+        for chunk in chunk_file(self.file_path):
 
             log.debug('sending new chunk')
             
             # post the data to the server
-            self.send_file_data(chunk, **kwargs)
+            self.send_file_data(chunk)
 
             # update our cursor
             self.cursor += len(chunk)
@@ -261,7 +275,7 @@ class UploadThread(Thread):
             self.data_sent += len(chunk)
 
             # update our history
-            file_history['cursor'] = cursor
+            file_history['cursor'] = self.cursor
 
             # save down history
             save_history(files_history)
@@ -300,24 +314,18 @@ class UploadThread(Thread):
         log.debug('creating request')
 
         # create our request
-        request = Request(url,None,headers)
+        request = Request(self.url,None,headers)
 
         log.debug('adding chunk data to request')
 
         # add our chunk's data to the request
         request.add_data(chunk)
 
-        log.debug('creating handler')
-
-        # create a handler for the request
-        # TODO: should use HTTPS ..
-        handler = HTTPHandler()
-
         log.debug('posting request')
 
         try:
             # send our request to the server
-            handler.http_request(request)
+            urlopen(request)
 
         except:
             raise
@@ -326,6 +334,7 @@ class UploadThread(Thread):
 
 
 if __name__ == '__main__':
+    import sys
 
     log.debug('starting')
     log.debug('creating uploader')
