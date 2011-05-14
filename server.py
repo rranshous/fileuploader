@@ -16,6 +16,7 @@ import tornado.options
 from tornado.options import define, options
 from copy import copy
 from functools import partial
+from hashlib import md5
 
 import logging
 logging.basicConfig(level=logging.DEBUG)
@@ -33,7 +34,15 @@ def get_temp_file_path(file_name,file_hash):
     
     # TODO: better
     return os.path.join(TEMP_FILE_DIR,
-                        file_name)
+                        file_name,
+                        file_hash)
+
+def get_chunk_hash(chunk):
+    """ returns the MD5 for the data """
+    m = md5()
+    m.update(chunk)
+    return m.hexdigest()
+
 
 class Handler():
     def __init__(self,stream):
@@ -42,12 +51,22 @@ class Handler():
         # request headers
         self.headers = {}
 
-    def __call__(data):
+    def __call__(self,data):
         """
-        we've received some headers, get
-        ready to get some file data
+        handle data coming off the socket
         """
 
+        # if we haven't gotten the headers yet,
+        # than we should be receiving those now
+        if not self.headers:
+            self.headers_reader(data)
+
+        else:
+            # if we already have the headers this
+            # is file data
+            self.data_reader(data)
+
+    def headers_reader(self,data):
         log.debug('handling headers: %s' % data)
          
         # split the header by newline
@@ -83,7 +102,7 @@ class Handler():
         self.file_hash = self.headers.get('content-md5')
 
         # figure out what they want to name the file
-        self.file_name = self.headers.get('PATH','').strip()
+        file_name = self.headers.get('PATH','').strip()
         
         # the file name comes w/ the host name, strip it
         self.file_name = '/'.join(file_name.split('/')[1:])
@@ -94,12 +113,13 @@ class Handler():
 
         # we may have already started to construct
         # the file, maybe not. figure out where
-        self.temp_file_path = get_temp_file_path(file_name,file_hash)
+        self.temp_file_path = get_temp_file_path(self.file_name,
+                                                 self.file_hash)
 
-        log.debug('temp_file_path: %s' % temp_file_path)
+        log.debug('temp_file_path: %s' % self.temp_file_path)
 
         # read the next sub-chunk off the line
-        stream.read_bytes(CHUNK_SIZE, self.data_reader)
+        self.stream.read_bytes(CHUNK_SIZE, self.data_reader)
         
 
 
@@ -112,79 +132,95 @@ class Handler():
         log.debug('data reader got data: %s' % len(data))
 
         try:
-            log.debug('writing data: %s' % temp_file_path)
+            log.debug('writing data: %s' % self.temp_file_path)
 
             # make sure the temp file exists
-            if not os.path.exists(temp_file_path):
-                # create a file
-                with open(temp_file_path,'w') as fh:
+            if not os.path.exists(self.temp_file_path):
+
+                # what is the dir the file will live in?
+                file_dir = os.path.dirname(self.temp_file_path)
+
+                # create the dirs leading to it if it isn't there
+                if not os.path.exists(file_dir):
+                    os.makedirs(file_dir)
+
+                # create the file
+                with open(self.temp_file_path,'w') as fh:
                     pass
 
             # open our file, and write our piece
-            with open(temp_file_path,'r+b') as fh:
-                log.debug('offset: %s' % offset)
+            with open(self.temp_file_path,'r+b') as fh:
+                log.debug('cursor: %s' % self.cursor)
                 
                 # find our spot in the file
-                fh.seek(cursor)
+                fh.seek(self.cursor)
+
+                log.debug('writing data')
 
                 # dump our shit
                 fh.write(data)
 
             # we receive the data sequentially!
-            cursor += len(data)
+            self.cursor += len(data)
+
+            log.debug('new cursor')
 
         except:
             # TODO: write back error
             raise
         
-
-        log.debug('offset: %s' % offset)
-
         # if we've received all the data we want to check
         # the md5 of what we received
-        if offset == content_len:
+        if self.cursor == self.content_len:
 
             log.debug('got all data! checking chunk')
             log.debug('reading file data')
 
             # get our full chunks data
-            with open(temp_file_path,'r+b') as fh:
+            with open(self.temp_file_path,'r+b') as fh:
                 
                 # seek into the temp file to where we
                 # started writing the chunk
-                fh.seek(offset)
+                fh.seek(self.offset)
 
                 # read in the complete chunk
-                data = fh.read(content_len)
+                data = fh.read(self.content_len)
 
             # get it's hash
             _hash = get_chunk_hash(data)
 
-            log.debug('file_hash: %s' % file_hash)
+            log.debug('file_hash: %s' % self.file_hash)
             log.debug('our_hash: %s' % _hash)
 
             # is it the same as the hash we thought we'd get
-            if file_hash != _hash:
+            if self.file_hash != _hash:
 
                 # woops! file must have currupt en route
                 log.debug('CURRUPT!')
 
-                self.stream.write('HTTP/1.1 400 BadDigest')
+                self.stream.write('HTTP/1.1 400 BadDigest\r\n')
             
             else:
                 log.debug('200 OK')
 
                 # tell them we're done
-                self.stream.write('HTTP/1.1 200 OK\r\n\r\n')
+                self.stream.write('HTTP/1.1 200 OK\r\n'+ \
+                                  'Content-Length: 0\r\n' + \
+                                  'Connection: close\r\n\r\n')
+
+            log.debug('done!')
 
             # kill the connection
-            self.stream.close()
+            #self.stream.close()
 
         else:
+            log.debug('not end of upload')
+
             # guess we're not done
             # read the next sub-chunk off the line
-            stream.read_bytes(CHUNK_SIZE, self.data_reader)
-            
+            self.stream.read_bytes(min(CHUNK_SIZE,
+                                       self.content_len - self.cursor),
+                                   self)
 
 class Server():
     
@@ -193,8 +229,8 @@ class Server():
 
         conn, addr = self._sock.accept()
         stream = iostream.IOStream(conn)
-        callback = partial(Handler(),stream)
-        stream.read_until('\r\n\r\n',callback)
+        handler = Handler(stream)
+        stream.read_until('\r\n\r\n',handler)
 
     def start(self, host, port):
         # let those listening know we are about to begin

@@ -13,13 +13,15 @@ from hashlib import md5
 import os.path
 from findfiles import find_files_iter as find_files
 from threading import Thread
+from time import sleep
+import json
 
 import logging
 logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger(__name__)
 
 
-CHUNK_SIZE = 5 * 1024 # 5MB
+CHUNK_SIZE = 5242880 # 5MB
 
 def chunk_file(file_path):
     """ generator: yields up chunks of a bin file """
@@ -51,27 +53,6 @@ def get_file_hash(path):
     return m.hexdigest()
 
 
-HISTORY_PATH = './history.json'
-
-def load_files_history():
-    
-    log.debug('loading history')
-
-    if not os.path.exists(HISTORY_PATH):
-        log.debug('no history found')
-        return {}
-
-    with file(HISTORY_PATH,'r') as fh:
-        return json.loads(fh.read())
-
-def save_files_history(history):
-    
-    log.debug('saving history')
-
-    with file(HISTORY_PATH,'w') as fh:
-        fh.write(json.dumps(history))
-
-
 class Uploader(object):
     def __init__(self,host,port):
 
@@ -82,16 +63,8 @@ class Uploader(object):
         # list of active uploads
         self.uploads = []
 
-        # history of the files, where
-        # we are in the file, it's hash etc
-        self.files_history = {}
-
-        # load up our previous history
-        self.files_history = load_files_history()
-
-        log.debug('uploader init: %s %s %s' % (
-                  self.host,self.port,
-                  len(self.files_history)))
+        log.debug('uploader init: %s %s' % (
+                  self.host,self.port))
 
     def get_progress(self):
         """
@@ -174,8 +147,7 @@ class Uploader(object):
 
             # create our upload thread
             upload = UploadThread(file_path,
-                                  self.host,self.port,
-                                  self.files_history)
+                                  self.host,self.port)
 
             log.debug('starting upload')
 
@@ -188,7 +160,7 @@ class Uploader(object):
 
 class UploadThread(Thread):
 
-    def __init__(self,file_path,host,port,files_history):
+    def __init__(self,file_path,host,port):
         Thread.__init__(self)
 
         # bytes sent
@@ -209,16 +181,13 @@ class UploadThread(Thread):
         # what file are we working on?
         self.file_path = file_path
 
-        # lookup for work done on files
-        self.files_history = files_history
-
         # where's the file going?
         self.host = host
         self.port = port
 
 
     # how far along are we ?
-    progress = property(lambda s: s.data_sent/s.file_size*100
+    progress = property(lambda s: (s.data_sent/s.file_size)*100
                                 if s.file_size else None)
 
     def run(self):
@@ -226,8 +195,6 @@ class UploadThread(Thread):
         given a source file's path will (re)start uploading
         a file to the server
         """
-
-        # TODO: check the resulting MD5 against the history
 
         log.debug('starting upload thread: %s %s %s' %
                   (self.file_path,self.host,self.port))
@@ -242,17 +209,8 @@ class UploadThread(Thread):
 
         log.debug('file hash: %s' % self.file_hash)
 
-        # see if we've already begun uploading it's data
-        file_history = self.files_history.setdefault(self.file_hash,{})
-
-        log.debug('file history: %s' % file_history)
-
         # figure out what the name of our file is
         self.file_name = os.path.basename(self.file_path)
-
-        # our curser is going to track the start of the current chunk
-        # get our cursor from history, or start @ 0
-        self.cursor = file_history.get('cursor',0)
 
         log.debug('cursor: %s' % self.cursor)
 
@@ -283,7 +241,13 @@ class UploadThread(Thread):
             file_history['cursor'] = self.cursor
 
             # save down history
-            save_history(files_history)
+            save_files_history(self.files_history)
+
+        # if we're done, than reset the cursor
+        # and update the history to show it's been
+        # uploaded before
+
+        logging.debug('DONE!')
 
 
     def send_file_data(self,chunk,**kwargs):
@@ -362,5 +326,7 @@ if __name__ == '__main__':
         
         # print out the progress
         print 'progress: %s' % uploader.get_progress()
+
+        sleep(1)
 
     # done!
