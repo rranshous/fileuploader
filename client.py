@@ -122,13 +122,13 @@ class Uploader(object):
         return progress
 
  
-    def is_uploading(self):
+    def is_active(self):
         """
         True / False are we actively uploading ?
         """
         
         # find the active uploads
-        active = [x for x in self.uploads if x.is_active()]
+        active = [x for x in self.uploads if x.is_alive()]
         
         # if any of them are active, we are active
         uploading = True if active else False
@@ -183,7 +183,7 @@ class Uploader(object):
             upload.start()
 
             # add it to our tracking list
-            uploads.append(upload)
+            self.uploads.append(upload)
 
 
 class UploadThread(Thread):
@@ -218,8 +218,8 @@ class UploadThread(Thread):
 
 
     # how far along are we ?
-    progress = property(lambda: self.data_sent/self.file_size*100
-                                if self.file_size else None)
+    progress = property(lambda s: s.data_sent/s.file_size*100
+                                if s.file_size else None)
 
     def run(self):
         """
@@ -247,6 +247,9 @@ class UploadThread(Thread):
 
         log.debug('file history: %s' % file_history)
 
+        # figure out what the name of our file is
+        self.file_name = os.path.basename(self.file_path)
+
         # our curser is going to track the start of the current chunk
         # get our cursor from history, or start @ 0
         self.cursor = file_history.get('cursor',0)
@@ -254,7 +257,9 @@ class UploadThread(Thread):
         log.debug('cursor: %s' % self.cursor)
 
         # set our url from the host and port
-        self.url = 'http://%s:%s' % (self.host,self.port)
+        self.url = 'http://%s:%s/%s' % (self.host,
+                                        self.port,
+                                        self.file_name)
 
         log.debug('url: %s' % self.url)
 
@@ -303,6 +308,7 @@ class UploadThread(Thread):
             'Content-Type':None,
             'Content-Length':len(chunk),
             'Content-MD5':chunk_hash,
+            'Content-Offset':self.cursor,
             'User-Agent':'UploadClientAlpha'
         }
 
@@ -340,7 +346,7 @@ if __name__ == '__main__':
     log.debug('creating uploader')
     
     # create an uploader
-    uploader = Uploader('localhost',80)
+    uploader = Uploader('localhost',8005)
 
     # feed it in the files we were passed
     for path in sys.argv[1:]:
@@ -352,7 +358,7 @@ if __name__ == '__main__':
 
    
     # sit on the uploader
-    while uploader.is_uploading():
+    while uploader.is_active():
         
         # print out the progress
         print 'progress: %s' % uploader.get_progress()
